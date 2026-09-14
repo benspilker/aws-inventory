@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local backups and environments
+*.bak
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Runtime output
+logs/
+artifacts/
