@@ -991,17 +991,15 @@ class ExcelReportWriter(ReportWriterPort):
         """Write Regions summary sheet."""
         sheet = workbook.add_worksheet('Regions')
 
-        # Headers
+        # Headers. Regional costs remain available on the detailed Costs sheet;
+        # keep this worksheet focused on resource coverage.
         headers = ['Region', 'Resource Count']
-        if report.has_costs():
-            headers.append('Total Cost')
 
         for col, header in enumerate(headers):
             sheet.write(0, col, header, formats['header'])
 
         # Data
         resource_counts = report.inventory.count_by_region()
-        cost_by_region = report.costs.cost_by_region() if report.costs else {}
 
         # Sort by resource count
         regions_sorted = sorted(resource_counts.items(), key=lambda x: x[1], reverse=True)
@@ -1011,10 +1009,6 @@ class ExcelReportWriter(ReportWriterPort):
             sheet.write(row, 0, region)
             sheet.write(row, 1, count, formats['number'])
 
-            if report.has_costs():
-                cost = cost_by_region.get(region, Decimal('0'))
-                sheet.write(row, 2, float(cost), formats['currency'])
-
             row += 1
 
         # Auto-filter
@@ -1023,8 +1017,6 @@ class ExcelReportWriter(ReportWriterPort):
         # Column widths
         sheet.set_column('A:A', 20)
         sheet.set_column('B:B', 15)
-        if report.has_costs():
-            sheet.set_column('C:C', 15)
 
     def _write_resources_sheet(
         self,
