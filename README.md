@@ -1,14 +1,24 @@
 # Windmill integration
 
-This folder provides a Windmill deployment pair. The canonical entry file is
-`aws_inventory_windmill.py`; it is intentionally slim and loads the full
-application from the sibling `modules/aws_ri` package at runtime.
+This repository contains the AWS inventory application and its Windmill
+entry points. The canonical report implementation is in `modules/aws_ri`;
+both entry points ultimately use the same report writer.
 
-The `modules/aws_ri` package originated from the [AWS Resource Inventory
-repository](https://github.com/hpfpv/aws-resource-inventory). The Windmill
-deployment may use a separately managed module mirror or runtime checkout,
-but that repository is the original source location for the application
-modules.
+## Draw.io resource map
+
+Each generated Excel report with inventory now includes an adjacent `.drawio`
+resource map. Its first tab is an account-wide VPC index. Each VPC has a detail
+tab with resources grouped inside subnet and VPC boundaries, followed by an
+account/regional services tab and a tabular `Associations` index. VPC and subnet
+membership is represented by containment so those common links do not create
+crossing connector lines. Other resource relationships remain listed in the
+association index.
+
+Resource cards prefer the AWS `Name` tag, then the inventory resource name,
+with the resource ID shown as a secondary label. The existing Network, Compute,
+Data, Security, and Other color palette is retained. The map uses names, tags,
+regions, and configuration already collected into the inventory report; it
+does not make additional AWS API calls.
 
 ## Entry point
 
@@ -39,25 +49,21 @@ repository URL is read from the Windmill variable
 artifacts to S3 as well. The GitLab token is never included in the repository
 URL, command arguments, logs, or returned result.
 
-## Worker setup
+## Worker setup and source changes
 
-Windmill should sync the `windmill/modules` directory from GitLab and deploy
-the entry script with that directory available beside it. The worker does not
-need the repository's `src` package. It only needs the third-party packages in
-`requirements.txt`. For production, prefer
-an IAM role on the Windmill worker that can assume read-only roles in target
-accounts. Temporary access keys are supported for compatibility, but their
-expiration must be handled by the calling flow.
+`aws_inventory_windmill.py` clones this repository's configured branch into a
+temporary worker directory and loads `modules/aws_ri` from that checkout.
+Changes to the Draw.io layout therefore belong in
+`modules/aws_ri/infrastructure/excel/drawio_graph_writer.py`; report assembly
+and relationship extraction are in `modules/aws_ri/infrastructure/excel/excel_writer.py`.
+No generated Windmill copy of the report writer needs rebuilding.
 
-## Rebuilding the Windmill script
+`aws_inventory_main.py` uses the local repository package. The shared runtime
+helper supports either `modules/aws_ri` or `src/aws_ri` layouts and places the
+matching source directory on `PYTHONPATH` for the CLI subprocess.
 
-When the application source changes, update `modules/aws_ri` and run this from
-the repository root:
-
-```powershell
-python windmill\build_windmill.py
-```
-
-That regenerates `aws_inventory_windmill.py` from the slim template. The
-builder is development-time tooling; Windmill deployment needs the generated
-entry script plus the `modules` directory.
+The Windmill worker needs the third-party packages in `requirements.txt` and
+the access configured for the selected entry point. For production, prefer an
+IAM role on the worker that can assume read-only roles in target accounts.
+Temporary access keys are supported for compatibility, but their expiration
+must be handled by the calling flow.

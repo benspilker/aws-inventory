@@ -98,8 +98,11 @@ def main(
         command.extend(["--days", str(days)])
 
         environment = os.environ.copy()
+        source_root = repo_root / "src"
+        if not (source_root / "aws_ri").is_dir():
+            source_root = repo_root / "modules"
         environment["PYTHONPATH"] = os.pathsep.join(
-            [str(repo_root / "src"), environment.get("PYTHONPATH", "")]
+            [str(source_root), environment.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
         completed = subprocess.run(
             command,

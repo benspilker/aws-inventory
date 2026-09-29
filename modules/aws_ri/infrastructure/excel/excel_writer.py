@@ -2,7 +2,6 @@
 
 import logging
 import json
-import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
 from decimal import Decimal
@@ -18,6 +17,8 @@ from aws_ri.application.ports.exceptions import ReportWriterError
 from aws_ri.domain.report_model import ReportModel
 from aws_ri.domain.posture.securityhub import SecurityHubSeverity
 from aws_ri.domain.posture.compliance import AdvisorSeverity
+from aws_ri.domain.inventory.resource import Resource
+from aws_ri.infrastructure.excel.drawio_graph_writer import DrawioGraphWriter
 
 
 logger = logging.getLogger(__name__)
@@ -152,9 +153,13 @@ class ExcelReportWriter(ReportWriterPort):
                     logger.warning("Report has no cost data")
 
             logger.info(f"Excel report written successfully to {output_path}")
-            graph_edges = self._extract_graph_edges(report)
-            if graph_edges:
-                self._write_drawio_graph(output_path.with_suffix('.drawio'), graph_edges)
+            if report.inventory.total_count() > 0:
+                graph_records = self._extract_drawio_graph_records(report.inventory.resources)
+                DrawioGraphWriter.write(
+                    output_path.with_suffix('.drawio'),
+                    report.inventory.resources,
+                    graph_records,
+                )
 
         except Exception as e:
             raise ReportWriterError(f"Failed to write Excel report: {e}") from e
@@ -163,17 +168,10 @@ class ExcelReportWriter(ReportWriterPort):
     def _extract_graph_edges(report: ReportModel) -> list[tuple[str, str, str, str]]:
         """Normalize enrichment links into source/relationship/target rows."""
         edges: list[tuple[str, str, str, str]] = []
-        for resource in report.inventory.resources:
+        records = ExcelReportWriter._extract_drawio_graph_records(report.inventory.resources)
+        for resource, relation, target, group in records:
             source = resource.arn or resource.resource_id
-            enrichment = (resource.configuration or {}).get('inventory_enrichment', {})
-            for group in ('relationships', 'dependencies'):
-                for relation, raw in (enrichment.get(group) or {}).items():
-                    values = raw if isinstance(raw, (list, tuple, set)) else [raw]
-                    for value in values:
-                        if isinstance(value, dict):
-                            value = value.get('Id') or value.get('Arn') or value.get('Name')
-                        if value not in (None, '', [], {}):
-                            edges.append((str(source), str(relation), str(value), group))
+            edges.append((str(source), relation, str(target), group))
         # Dedupe by (source, relation, target): an edge that exists as both a
         # 'relationships' and 'dependencies' link is one logical connection, not two.
         # The first-seen group label is preserved so the Excel 'Relationship Class'
@@ -183,6 +181,29 @@ class ExcelReportWriter(ReportWriterPort):
         for edge in edges:
             unique.setdefault(edge[:3], edge)
         return list(unique.values())
+
+    @staticmethod
+    def _extract_drawio_graph_records(resources: list[Resource]) -> list[tuple[Resource, str, Any, str]]:
+        """Retain each source resource so Draw.io can use its metadata and scope."""
+        records: list[tuple[Resource, str, Any, str]] = []
+        seen: set[tuple[str, str, str, str, str, str]] = set()
+        for resource in resources:
+            enrichment = (resource.configuration or {}).get('inventory_enrichment', {})
+            for group in ('relationships', 'dependencies'):
+                for relation, raw in (enrichment.get(group) or {}).items():
+                    values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+                    for value in values:
+                        if isinstance(value, dict):
+                            value = value.get('Id') or value.get('Arn') or value.get('Name') or value.get('id') or value.get('arn') or value.get('name')
+                        if value in (None, '', [], {}):
+                            continue
+                        target = str(value)
+                        key = (resource.account_id, resource.region, resource.resource_type, resource.resource_id, str(relation), target)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        records.append((resource, str(relation), target, group))
+        return records
 
     def _write_relationship_graph_sheet(self, workbook: Workbook, edges, formats) -> None:
         sheet = workbook.add_worksheet('Relationship Graph')
@@ -200,113 +221,6 @@ class ExcelReportWriter(ReportWriterPort):
         sheet.set_column('B:B', 24)
         sheet.set_column('C:C', 60)
         sheet.set_column('D:D', 22)
-
-    @staticmethod
-    def _write_drawio_graph(path: Path, edges) -> None:
-        """Write an Azure-ARI-style multi-page diagrams.net XML graph."""
-        mxfile = ET.Element('mxfile', {'host': 'app.diagrams.net'})
-        categories = {
-            'Network': ('vpc', 'subnet', 'securitygroup', 'security group', 'networkinterface', 'route', 'nat', 'internetgateway', 'eip'),
-            'Compute': ('lambda', 'ec2', 'ecs', 'eks', 'emr', 'sagemaker', 'apprunner', 'beanstalk'),
-            'Data': ('s3', 'rds', 'dynamodb', 'sqs', 'sns', 'kinesis', 'kafka', 'glue', 'athena', 'redshift', 'opensearch'),
-            'Security': ('iam', 'waf', 'cloudtrail', 'guardduty', 'shield', 'acm', 'backup', 'policy', 'role'),
-        }
-
-        def category(edge):
-            text = ' '.join(str(v).lower() for v in edge[:3])
-            for name, terms in categories.items():
-                if any(term in text for term in terms):
-                    return name
-            return 'Other'
-
-        grouped = {name: [] for name in (*categories.keys(), 'Other')}
-        for edge in edges:
-            grouped[category(edge)].append(edge)
-
-        # Overview aggregates many resource-level links into service-level links,
-        # keeping the landing page readable while detail pages retain every edge.
-        overview = {}
-        for source, relation, target, _ in edges:
-            source_service = ExcelReportWriter._graph_service_name(source)
-            target_service = ExcelReportWriter._graph_service_name(target)
-            key = (source_service, relation, target_service)
-            overview[key] = overview.get(key, 0) + 1
-        overview_edges = [(s, f'{rel} ({count})', t, 'summary') for (s, rel, t), count in overview.items()]
-        pages = [('Overview', overview_edges)] + [(name, values) for name, values in grouped.items() if values]
-        for page_name, page_edges in pages:
-            diagram = ET.SubElement(mxfile, 'diagram', {'name': page_name})
-            ExcelReportWriter._write_drawio_page(diagram, page_edges, page_name)
-        ET.ElementTree(mxfile).write(path, encoding='utf-8', xml_declaration=True)
-
-    @staticmethod
-    def _graph_service_name(value: str) -> str:
-        """Convert an ARN or identifier to a compact diagram label."""
-        text = str(value)
-        if text.startswith('arn:'):
-            parts = text.split(':', 5)
-            service = parts[2] if len(parts) > 2 else 'aws'
-            resource = parts[5] if len(parts) > 5 else text
-            return f'{service}: {resource.rsplit("/", 1)[-1].rsplit(":", 1)[-1][:48]}'
-        return text[:56]
-
-    @staticmethod
-    def _write_drawio_page(diagram, edges, page_name: str) -> None:
-        model = ET.SubElement(diagram, 'mxGraphModel', {'dx': '1400', 'dy': '900', 'grid': '1', 'page': '1', 'pageScale': '1'})
-        root = ET.SubElement(model, 'root')
-        ET.SubElement(root, 'mxCell', {'id': '0'})
-        ET.SubElement(root, 'mxCell', {'id': '1', 'parent': '0'})
-        nodes: dict[str, str] = {}
-        for source, relation, target, _ in edges:
-            for value in (source, target):
-                if value in nodes:
-                    continue
-                node_id = f'n{len(nodes) + 1}'
-                nodes[value] = node_id
-                idx = len(nodes) - 1
-                x, y = (idx % 5) * 280, (idx // 5) * 100
-                label = ExcelReportWriter._graph_service_name(value) if page_name == 'Overview' else ExcelReportWriter._graph_display_name(value)
-                fill, stroke = ExcelReportWriter._graph_colors(value, page_name)
-                style = f'rounded=1;whiteSpace=wrap;html=1;fillColor={fill};strokeColor={stroke};fontColor=#000000;fontSize=11;'
-                cell = ET.SubElement(root, 'mxCell', {'id': node_id, 'value': label, 'style': style, 'vertex': '1', 'parent': '1'})
-                ET.SubElement(cell, 'mxGeometry', {'x': str(x), 'y': str(y), 'width': '250', 'height': '58', 'as': 'geometry'})
-        for idx, (source, relation, target, _) in enumerate(edges, start=1):
-            cell = ET.SubElement(root, 'mxCell', {'id': f'e{idx}', 'value': relation, 'style': 'edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;jettySize=auto;orthogonalLoop=1;', 'edge': '1', 'parent': '1', 'source': nodes[source], 'target': nodes[target]})
-            ET.SubElement(cell, 'mxGeometry', {'relative': '1', 'as': 'geometry'})
-
-    @staticmethod
-    def _graph_display_name(value: str) -> str:
-        """Use a compact node label; the full value remains in the Excel index."""
-        text = str(value)
-        if text.startswith('arn:'):
-            parts = text.split(':', 5)
-            service = parts[2] if len(parts) > 2 else 'aws'
-            resource = parts[5] if len(parts) > 5 else text
-            return f'{service}: {resource.rsplit("/", 1)[-1][:52]}'
-        return text[:60]
-
-    @staticmethod
-    def _graph_colors(value: str, page_name: str) -> tuple[str, str]:
-        """Return a readable fill/stroke pair for a graph node."""
-        palettes = {
-            'Network': ('#d6eaff', '#5b9bd5'),
-            'Compute': ('#e4d9ff', '#8064a2'),
-            'Data': ('#d9f2d9', '#70ad47'),
-            'Security': ('#f8d7da', '#c0504d'),
-            'Other': ('#eeeeee', '#7f7f7f'),
-        }
-        if page_name != 'Overview':
-            return palettes.get(page_name, palettes['Other'])
-        text = str(value).lower()
-        groups = {
-            'Network': ('ec2:', 'vpc-', 'subnet-', 'security', 'network', 'route', 'gateway', 'eip'),
-            'Compute': ('lambda:', 'ecs:', 'eks:', 'sagemaker:', 'emr:', 'apprunner:', 'beanstalk:', 'instance/'),
-            'Data': ('s3:', 'rds:', 'dynamodb:', 'sqs:', 'sns:', 'kinesis:', 'kafka:', 'glue:', 'athena:', 'redshift:', 'opensearch:'),
-            'Security': ('iam:', 'waf:', 'cloudtrail:', 'guardduty:', 'shield:', 'acm:', 'backup:', 'role/'),
-        }
-        for group, terms in groups.items():
-            if any(term in text for term in terms):
-                return palettes[group]
-        return palettes['Other']
 
     def _create_formats(self, workbook: Workbook) -> dict[str, Any]:
         """Create reusable cell formats."""

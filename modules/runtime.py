@@ -16,16 +16,18 @@ def ensure_package_importable() -> Path:
     point.
     """
     current = Path(__file__).resolve()
-    candidates = [current.parents[2], Path.cwd(), Path.cwd().parent]
+    candidates = [current.parents[1], current.parents[2], Path.cwd(), Path.cwd().parent]
     for candidate in candidates:
-        if (candidate / "src" / "aws_ri").is_dir():
-            source = str(candidate / "src")
-            if source not in os.sys.path:
-                os.sys.path.insert(0, source)
-            return candidate
+        for source_name in ("modules", "src"):
+            source_root = candidate / source_name
+            if (source_root / "aws_ri").is_dir():
+                source = str(source_root)
+                if source not in os.sys.path:
+                    os.sys.path.insert(0, source)
+                return candidate
     raise RuntimeError(
-        "Could not locate the aws-ri source package. Sync the repository or "
-        "install aws-ri in the Windmill worker image."
+        "Could not locate aws-ri under modules/ or src/. Sync the repository "
+        "or install aws-ri in the worker image."
     )
 
 
