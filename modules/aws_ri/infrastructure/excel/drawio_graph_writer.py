@@ -76,7 +76,13 @@ class DrawioGraphWriter:
         data = cls._build_graph(resources, graph_records)
         root = ET.Element("mxfile", {"host": "app.diagrams.net"})
         cls._write_index(root, data)
-        for index, vpc_key in enumerate(sorted(data["vpcs"], key=lambda k: cls._node_sort(data["nodes"][k])), start=1):
+        populated_vpcs = set(data["vpc_members"]) | set(data["subnet_vpc"].values())
+        detail_vpcs = [
+            key
+            for key in sorted(data["vpcs"], key=lambda k: cls._node_sort(data["nodes"][k]))
+            if key in populated_vpcs
+        ]
+        for index, vpc_key in enumerate(detail_vpcs, start=1):
             cls._write_vpc_page(root, data, vpc_key, index)
         cls._write_account_page(root, data)
         cls._write_associations_page(root, data)
