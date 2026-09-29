@@ -174,7 +174,15 @@ class ExcelReportWriter(ReportWriterPort):
                             value = value.get('Id') or value.get('Arn') or value.get('Name')
                         if value not in (None, '', [], {}):
                             edges.append((str(source), str(relation), str(value), group))
-        return list(dict.fromkeys(edges))
+        # Dedupe by (source, relation, target): an edge that exists as both a
+        # 'relationships' and 'dependencies' link is one logical connection, not two.
+        # The first-seen group label is preserved so the Excel 'Relationship Class'
+        # column still reports whether the edge originated from relationships or
+        # dependencies, while drawio stops drawing the same arrow twice.
+        unique: dict[tuple[str, str, str], tuple[str, str, str, str]] = {}
+        for edge in edges:
+            unique.setdefault(edge[:3], edge)
+        return list(unique.values())
 
     def _write_relationship_graph_sheet(self, workbook: Workbook, edges, formats) -> None:
         sheet = workbook.add_worksheet('Relationship Graph')
