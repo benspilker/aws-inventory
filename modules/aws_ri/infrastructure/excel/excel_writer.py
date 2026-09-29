@@ -7,7 +7,7 @@ from collections import OrderedDict
 from pathlib import Path
 from decimal import Decimal
 from typing import Any, Optional
-from datetime import datetime
+from datetime import date, datetime
 
 import xlsxwriter
 from xlsxwriter.workbook import Workbook
@@ -1930,6 +1930,26 @@ class ExcelReportWriter(ReportWriterPort):
         sheet.set_column('F:F', 15)
         sheet.set_column('G:G', 15)
 
+    @staticmethod
+    def _format_standard_value(value: Any) -> tuple[Any, Optional[Any]]:
+        """Normalize a per-resource 'standard_values' cell and pick a cell format.
+
+        Returns:
+            A ``(display_value, cell_format_key)`` pair. ``cell_format_key`` is the
+            key into the ``formats`` dict (or ``None`` for default). ``date`` and
+            ``datetime`` instances return the ``'date'`` key so cells render as a
+            real timestamp instead of a raw Excel serial number. This is the
+            regression fix for the Creation Date column bug where EC2::Volume,
+            CloudFormation::Stack, ECR::Repository and other per-resource-type
+            sheets showed values like ``46166.84542`` rather than
+            ``2026-05-24 20:17:24``.
+        """
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, default=str, separators=(',', ':')), None
+        if isinstance(value, (datetime, date)) and not isinstance(value, bool):
+            return value, 'date'
+        return value, None
+
     def _write_resource_type_sheets(
         self,
         workbook: Workbook,
@@ -2009,9 +2029,9 @@ class ExcelReportWriter(ReportWriterPort):
                         enrichment.get('health', ''),
                     ]
                     for idx, value in enumerate(standard_values, start=6):
-                        if isinstance(value, (dict, list, tuple)):
-                            value = json.dumps(value, default=str, separators=(',', ':'))
-                        sheet.write(row, idx, value)
+                        display_value, cell_format_key = self._format_standard_value(value)
+                        cell_format = formats.get(cell_format_key) if cell_format_key else None
+                        sheet.write(row, idx, display_value, cell_format)
 
                     attribute_values = resource.attribute_values(reference_time)
                     for idx, header in enumerate(attr_headers):
